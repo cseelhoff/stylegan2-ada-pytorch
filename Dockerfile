@@ -19,4 +19,12 @@ WORKDIR /workspace
 # extension builds significantly faster as we only compile for the
 # currently active GPU configuration.
 RUN (printf '#!/bin/bash\nunset TORCH_CUDA_ARCH_LIST\nexec \"$@\"\n' >> /entry.sh) && chmod a+x /entry.sh
+
+RUN apt update
+RUN apt install libgl1-mesa-glx -y
+RUN apt install ffmpeg libsm6 libxext6 -y
+RUN conda init
+RUN source /root/.bashrc
+RUN source /opt/conda/bin/activate base
+RUN pip install retina-face
 ENTRYPOINT ["/entry.sh"]
