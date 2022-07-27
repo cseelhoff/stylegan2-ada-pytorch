@@ -24,6 +24,8 @@ RUN apt update
 RUN apt install libgl1-mesa-glx -y
 RUN conda init
 RUN source /root/.bashrc
-RUN source /opt/conda/bin/activate base
-RUN pip install retina-face
+RUN conda activate base
+RUN pip install retinaface_pytorch
+RUN pip uninstall opencv-python
+RUN pip install opencv-python
 ENTRYPOINT ["/entry.sh"]

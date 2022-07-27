@@ -14,9 +14,11 @@ from argparse import ArgumentParser
 import math
 import multiprocessing as mp
 import time
-from retinaface import RetinaFace
+#from retinaface import RetinaFace
+import cv2
+from retinaface.pre_trained_models import get_model
 import scipy
-
+from numpy import asarray
 
 def resize_image(image):
     if image.shape[2] > 256:
@@ -220,24 +222,27 @@ def chunks(lst, n):
         yield lst[i: i + n]
 
 def get_landmark2(filepath, predictor):
-    faces = RetinaFace.detect_faces(filepath, threshold=0.5, model=predictor)
+    image = PIL.Image.open(filepath)
+    data = asarray(image)
+    faces = predictor.predict_jsons(data)
+    #faces = RetinaFace.detect_faces(filepath, threshold=0.5, model=predictor)
     largest_face_size = 0
     largest_face = None
-    for face in faces.values():
+    for face in faces:
         print(face['score'])        
         print(face)
-        face_size = (face['facial_area'][2] - face['facial_area'][0]) * (
-                    face['facial_area'][3] - face['facial_area'][1])
+        face_size = (face['bbox'][2] - face['bbox'][0]) * (
+                    face['bbox'][3] - face['bbox'][1])
         if face_size > largest_face_size:
             largest_face_size = face_size * face['score'] * face['score'] 
             largest_face = face
     lm = [[0, 0]] * 68
     for i in range(36, 42):
-        lm[i] = largest_face['landmarks']['right_eye']
+        lm[i] = largest_face['landmarks'][0]
     for i in range(42, 48):
-        lm[i] = largest_face['landmarks']['left_eye']
-    lm[48] = largest_face['landmarks']['mouth_right']
-    lm[54] = largest_face['landmarks']['mouth_left']
+        lm[i] = largest_face['landmarks'][1]
+    lm[48] = largest_face['landmarks'][3]
+    lm[54] = largest_face['landmarks'][4]
 
     return np.array(lm)
 
@@ -355,7 +360,9 @@ def align_face(filepath, predictor):
 def extract_on_paths(file_paths):
     # predictor = dlib.shape_predictor(SHAPE_PREDICTOR_PATH)
     os.environ["CUDA_VISIBLE_DEVICES"]="0"
-    predictor = RetinaFace.build_model()
+    #predictor = RetinaFace.build_model()
+    predictor = get_model("resnet50_2020-07-20", max_size=2048)
+    predictor.eval()
     pid = mp.current_process().name
     print("\t{} is starting to extract on #{} images".format(pid, len(file_paths)))
     tot_count = len(file_paths)
