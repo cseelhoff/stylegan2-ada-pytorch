@@ -1,0 +1,24 @@
+// "remote.containers.executeInWSL": true
+{
+	"name": "Existing Dockerfile",
+	"context": "..",
+	"dockerFile": "../Dockerfile",
+	"runArgs": [ "--gpus=all" ],
+	"mounts": [ 
+		"source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind",
+		"source=/mnt/wslg,target=/mnt/wslg,type=bind"
+	],
+	"containerEnv": {
+		"DISPLAY": "${localEnv:DISPLAY}",
+		"WAYLAND_DISPLAY": "${localEnv:WAYLAND_DISPLAY}",
+		"XDG_RUNTIME_DIR": "${localEnv:XDG_RUNTIME_DIR}",
+		"PULSE_SERVER": "${localEnv:PULSE_SERVER}"
+	},
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"ms-python.python"
+			]
+		}
+	}
+}
