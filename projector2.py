@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from blur2 import blur_score
 import dnnlib
 import legacy
-
+import torchvision.transforms
 from argparse import ArgumentParser
 import math
 import multiprocessing as mp
@@ -23,16 +23,29 @@ from numpy import asarray
 import PIL.ImageFilter
 
 
-def resize_image(image):
-    if image.shape[2] > 256:
-        return F.interpolate(image, size=(256, 256), mode='area')
+blur = torchvision.transforms.GaussianBlur(kernel_size=7)
+max_vgg16_size = 256
+
+def resize_image(image, blursteps=7):
+    for _ in range(blursteps):
+        image = blur(image)    
+    if image.shape[2] > max_vgg16_size or image.shape[3] > max_vgg16_size:
+        image = F.interpolate(image, size=(max_vgg16_size, max_vgg16_size), mode='area')
+    #PIL.Image.fromarray(image.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy(), 'RGB').save(f'proj.jpg')
     return image
+
+def calcTargets(coords, target_images, vgg16, blursteps):
+    targets = []
+    for c in coords:
+        target = resize_image(target_images[0:1, 0:3, c[0]:c[1], c[2]:c[3]], blursteps)
+        targets.append(vgg16(target, resize_images=False, return_lpips=True))
+    return targets
 
 def project2(
     G, q0, q1, q2, q3, vgg16, starting_wplus_space,
     target: torch.Tensor, # [C,H,W] and dynamic range [0,255], W & H must match G output resolution
     *,
-    num_steps                  = 1000,
+    num_steps,
     w_avg_samples              = 10000,
     initial_learning_rate      = 0.1,
     initial_noise_factor       = 0.05,
@@ -70,15 +83,22 @@ def project2(
 
     # Features for target image.
     target_images = target.unsqueeze(0).to(device).to(torch.float32)
-    canvas = [0, 1024, 0, 1024] #y_start,y_end,x_start,x_end
-    mouth = [680, 810, 512-132, 512+132]
-    eyes = [410, 535, 512-242, 512+242]
-    coords = [canvas, mouth, eyes]
-    targets = []
-    for c in coords:
-        target = resize_image(target_images[0:1, 0:3, c[0]:c[1], c[2]:c[3]])
-        targets.append(vgg16(target, resize_images=False, return_lpips=True))
-
+    minx = max(q0[0],q1[0]) + 4
+    maxx = min(q2[0],q3[0]) - 4
+    miny = max(q0[1],q3[1]) + 4
+    maxy = min(q1[1],q2[1]) - 4
+    canvas = [miny, maxy, minx, maxx] #y_start,y_end,x_start,x_end
+    #mouth = [710, 880, 512-160, 512+160]
+    mouth = [670, 880, 512-160, 512+160]
+    #eyes = [380, 535, 512-270, 512+270]
+    eyes1 = [400, 530, max(512-300, minx), 512-40]
+    eyes2 = [400, 530, 512+40, min(512+300,maxx)]
+    coords = [canvas, mouth, eyes1, eyes2]
+    #coords = [canvas]
+    #targets = calcTargets(coords, target_images, vgg16, blursteps=20)
+    blursteps = 7
+    targets = calcTargets(coords, target_images, vgg16, blursteps=blursteps)
+    
     #starting_wplus_space = torch.load(f'../restyle/output/inference_coupled/{target_short_name}.pt')
     w_opt = starting_wplus_space.detach().clone().cuda()
     w_opt.requires_grad = True
@@ -89,7 +109,7 @@ def project2(
     for buf in noise_bufs.values():
         buf[:] = torch.randn_like(buf)
         buf.requires_grad = True
-
+    #oldblur=-1
     for step in range(num_steps):
         # Learning rate schedule.
         t = step / num_steps
@@ -109,9 +129,16 @@ def project2(
         # Downsample image to 256x256 if it's larger than that. VGG was built for 224x224 images.
         synth_images = (synth_images + 1) * (255/2)
         dist = 0
+        #coords = [canvas]
+        #if t >= 0.00:
+        #    coords = [canvas, mouth, eyes1, eyes2]
+        #newblur = int(6)
+        #if newblur > oldblur:
+        #    targets = calcTargets(coords, target_images, vgg16, blursteps=newblur)
+        #    oldblur = newblur
         for (c, target) in zip(coords, targets):
             synth_image_clone = synth_images.clone()
-            synth = resize_image(synth_image_clone[0:1, 0:3, c[0]:c[1], c[2]:c[3]])
+            synth = resize_image(synth_image_clone[0:1, 0:3, c[0]:c[1], c[2]:c[3]], blursteps=blursteps)
             synth_features = vgg16(synth, resize_images=False, return_lpips=True)
             dist += (target - synth_features).square().sum()
 
@@ -125,7 +152,8 @@ def project2(
                 if noise.shape[2] <= 8:
                     break
                 noise = F.avg_pool2d(noise, kernel_size=2)
-        loss = dist + reg_loss * regularize_noise_weight
+        loss2 = (ws - starting_wplus_space).square().sum() * 0.0001
+        loss = loss2 + dist + (reg_loss * regularize_noise_weight)
 
         # Step
         optimizer.zero_grad(set_to_none=True)
@@ -159,7 +187,7 @@ def run_projection3(target_pil, q0, q1, q2, q3, device, G, vgg16, starting_wplus
     projected_w_steps = project2(
         G, q0, q1, q2, q3, vgg16, starting_wplus_space,
         target=torch.tensor(target_uint8.transpose([2, 0, 1]), device=device), # pylint: disable=not-callable
-        num_steps=5000,
+        num_steps=2000,
         device=device,
         verbose=True,
         target_short_name=target_short_name
@@ -270,7 +298,7 @@ def align_face(filepath, predictor, device, vgg16):
 
     output_size = 1024
     transform_size = 4096
-    enable_padding = True
+    enable_padding = False
 
     # Shrink.
     img_before_resize = img
@@ -279,7 +307,7 @@ def align_face(filepath, predictor, device, vgg16):
     shrink = int(np.floor(qsize / output_size * 0.5))
     if shrink > 1:
         rsize = (int(np.rint(float(img.size[0]) / shrink)), int(np.rint(float(img.size[1]) / shrink)))
-        img = img.resize(rsize, PIL.Image.ANTIALIAS)
+        img = img.resize(rsize, PIL.Image.LANCZOS)
         quad /= shrink
         qsize /= shrink
 
@@ -310,6 +338,8 @@ def align_face(filepath, predictor, device, vgg16):
         min(quad[2][1], img.size[1]),
         min(quad[3][0], img.size[0]),
         max(quad[3][1], 0))
+
+    flat_quad = (quad + 0.5).flatten()
     if enable_padding:
         # Pad.
         pad = (
@@ -339,8 +369,7 @@ def align_face(filepath, predictor, device, vgg16):
             img = PIL.Image.fromarray(np.uint8(np.clip(np.rint(img), 0, 255)), "RGB")
             quad += pad[:2]
 
-    # Transform.
-    flat_quad = (quad + 0.5).flatten()
+    # Transform.    
     img = img.transform((transform_size, transform_size), PIL.Image.Transform.QUAD, flat_quad, PIL.Image.Resampling.BILINEAR)
     l, m = quad_to_rect(flat_quad[0], flat_quad[1], flat_quad[2], flat_quad[3], flat_quad[4], flat_quad[5], flat_quad[6], flat_quad[7], backup_quad[0], backup_quad[1])
     l = max(0, math.floor(l * output_size))
@@ -383,9 +412,9 @@ def extract_on_paths(file_paths, device, vgg16, G):
         res, q0, q1, q2, q3 = align_face(file_path, predictor, device, vgg16)
         res = res.convert("RGB")
         os.makedirs(os.path.dirname(res_path), exist_ok=True)
-        res.save(res_path)
+        #res.save(res_path)
         #use restyle to get starting wplus_space
-        starting_wplus_space = 0
+        starting_wplus_space = torch.load(f'./mean.pt')
         #find w+ space, by comparing q0-q3
         run_projection3(res, q0, q1, q2, q3, device, G, vgg16, starting_wplus_space, target_short_name='target')
         #except Exception:
