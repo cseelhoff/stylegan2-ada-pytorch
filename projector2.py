@@ -1,104 +1,76 @@
 """Project given image to the latent space of pretrained network pickle."""
 import copy
 import os
-from time import perf_counter
-import imageio
 import numpy as np
 import PIL.Image
 import torch
 import torch.nn.functional as F
-from blur2 import blur_score
 import dnnlib
 import legacy
-import torchvision.transforms
-from argparse import ArgumentParser
 import math
-import multiprocessing as mp
-import time
-#from retinaface import RetinaFace
-import cv2
-from retinaface.pre_trained_models import get_model
-import scipy
-from numpy import asarray
 import PIL.ImageFilter
+import dlib
 
 
-blur = torchvision.transforms.GaussianBlur(kernel_size=7)
-max_vgg16_size = 256
-
-def resize_image(image, blursteps=7):
-    for _ in range(blursteps):
-        image = blur(image)    
-    if image.shape[2] > max_vgg16_size or image.shape[3] > max_vgg16_size:
-        image = F.interpolate(image, size=(max_vgg16_size, max_vgg16_size), mode='area')
-    #PIL.Image.fromarray(image.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy(), 'RGB').save(f'proj.jpg')
+def resize_image(image):
+    newx = 224
+    newy = 224
+    if image.shape[2] > newx or image.shape[3] > newy:
+        image = F.interpolate(image, size=(newx, newy), mode='area')    
     return image
 
-def calcTargets(coords, target_images, vgg16, blursteps):
+def calcTargets(coords, target_images, vgg16):
     targets = []
+    i = 0
     for c in coords:
-        target = resize_image(target_images[0:1, 0:3, c[0]:c[1], c[2]:c[3]], blursteps)
+        target = resize_image(target_images[0:1, 0:3, c[0]:c[1], c[2]:c[3]])
+        PIL.Image.fromarray(target.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy(), 'RGB').save(f'proj{i}.jpg')
         targets.append(vgg16(target, resize_images=False, return_lpips=True))
+        i += 1
     return targets
 
 def project2(
-    G, q0, q1, q2, q3, vgg16, starting_wplus_space,
-    target: torch.Tensor, # [C,H,W] and dynamic range [0,255], W & H must match G output resolution
-    *,
-    num_steps,
+    target_pil, eyeleftp, eyerightp, mouthp, rotate_mask,
+    device: torch.device, G, vgg16, starting_wplus_space, target_short_name: str,
+    num_steps                  = 1000,
     w_avg_samples              = 10000,
     initial_learning_rate      = 0.1,
     initial_noise_factor       = 0.05,
     lr_rampdown_length         = 0.25,
     lr_rampup_length           = 0.05,
     noise_ramp_length          = 0.75,
-    regularize_noise_weight    = 1e5,
-    verbose                    = False,
-    device: torch.device,
-    target_short_name: str
+    regularize_noise_weight    = 1e5
 ):
+    outdir = "./outdir"
+    seed = 303
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch_mask = torch.tensor(rotate_mask.transpose([2, 0, 1]), device=device)
+    target_pil.save(f'{outdir}/{target_short_name}target.jpg')
+    target_uint8 = np.array(target_pil, dtype=np.uint8)
+    target=torch.tensor(target_uint8.transpose([2, 0, 1]), device=device)
+    target=torch.mul(target, torch_mask)
     assert target.shape == (G.img_channels, G.img_resolution, G.img_resolution)
-
-    def logprint(*args):
-        if verbose:
-            print(*args)
-
-    G = copy.deepcopy(G).eval().requires_grad_(False).to(device) # type: ignore
-
-    # Compute w stats.
-    logprint(f'Computing W midpoint and stddev using {w_avg_samples} samples...')
+    G = copy.deepcopy(G).eval().requires_grad_(False).to(device) 
+    print(f'Computing W midpoint and stddev using {w_avg_samples} samples...')
     z_samples = np.random.RandomState(123).randn(w_avg_samples, G.z_dim)
     w_samples = G.mapping(torch.from_numpy(z_samples).to(device), None)  # [N, L, C]
     w_samples = w_samples[:, :1, :].cpu().numpy().astype(np.float32)       # [N, 1, C]
     w_avg = np.mean(w_samples, axis=0, keepdims=True)      # [1, 1, C]
     w_std = (np.sum((w_samples - w_avg) ** 2) / w_avg_samples) ** 0.5
-
-    # Setup noise inputs.
     noise_bufs = { name: buf for (name, buf) in G.synthesis.named_buffers() if 'noise_const' in name }
-
-    # Load VGG16 feature detector.
-    #url = 'https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/metrics/vgg16.pt'
-    #with dnnlib.util.open_url(url) as f:
-    #    vgg16 = torch.jit.load(f).eval().to(device)
-
-    # Features for target image.
     target_images = target.unsqueeze(0).to(device).to(torch.float32)
-    minx = max(q0[0],q1[0]) + 4
-    maxx = min(q2[0],q3[0]) - 4
-    miny = max(q0[1],q3[1]) + 4
-    maxy = min(q1[1],q2[1]) - 4
+    minx = 0
+    maxx = 1024
+    miny = 0
+    maxy = 1024
     canvas = [miny, maxy, minx, maxx] #y_start,y_end,x_start,x_end
-    #mouth = [710, 880, 512-160, 512+160]
-    mouth = [670, 880, 512-160, 512+160]
-    #eyes = [380, 535, 512-270, 512+270]
-    eyes1 = [400, 530, max(512-300, minx), 512-40]
-    eyes2 = [400, 530, 512+40, min(512+300,maxx)]
-    coords = [canvas, mouth, eyes1, eyes2]
-    #coords = [canvas]
-    #targets = calcTargets(coords, target_images, vgg16, blursteps=20)
-    blursteps = 7
-    targets = calcTargets(coords, target_images, vgg16, blursteps=blursteps)
-    
+    mouth = [max(mouthp[1]-110,miny), min(mouthp[1]+110,maxy), max(mouthp[0]-110,minx), min(mouthp[0]+110,maxx)]
+    left_eye = [max(eyeleftp[1]-80,miny), min(eyeleftp[1]+80,maxy), max(eyeleftp[0]-140,minx), min(eyeleftp[0]+80,maxx)]
+    right_eye = [max(eyerightp[1]-80,miny), min(eyerightp[1]+80,maxy), max(eyerightp[0]-80,minx), min(eyerightp[0]+140,maxx)]
+    coords = [mouth, left_eye, right_eye]
+    coords = [canvas, mouth, left_eye, right_eye]
+    targets = calcTargets(coords, target_images, vgg16)
     #starting_wplus_space = torch.load(f'../restyle/output/inference_coupled/{target_short_name}.pt')
     w_opt = starting_wplus_space.detach().clone().cuda()
     w_opt.requires_grad = True
@@ -109,9 +81,7 @@ def project2(
     for buf in noise_bufs.values():
         buf[:] = torch.randn_like(buf)
         buf.requires_grad = True
-    #oldblur=-1
     for step in range(num_steps):
-        # Learning rate schedule.
         t = step / num_steps
         w_noise_scale = w_std * initial_noise_factor * max(0.0, 1.0 - t / noise_ramp_length) ** 2
         lr_ramp = min(1.0, (1.0 - t) / lr_rampdown_length)
@@ -120,25 +90,16 @@ def project2(
         lr = initial_learning_rate * lr_ramp
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
-
-        # Synth images from opt_w.
         w_noise = torch.randn_like(w_opt) * w_noise_scale
         ws = w_opt + w_noise
         synth_images = G.synthesis(ws, noise_mode='const')
-
-        # Downsample image to 256x256 if it's larger than that. VGG was built for 224x224 images.
         synth_images = (synth_images + 1) * (255/2)
         dist = 0
-        #coords = [canvas]
-        #if t >= 0.00:
-        #    coords = [canvas, mouth, eyes1, eyes2]
-        #newblur = int(6)
-        #if newblur > oldblur:
-        #    targets = calcTargets(coords, target_images, vgg16, blursteps=newblur)
-        #    oldblur = newblur
         for (c, target) in zip(coords, targets):
             synth_image_clone = synth_images.clone()
-            synth = resize_image(synth_image_clone[0:1, 0:3, c[0]:c[1], c[2]:c[3]], blursteps=blursteps)
+            synth_image_clone = torch.mul(synth_image_clone, torch_mask)
+            synth = resize_image(synth_image_clone[0:1, 0:3, c[0]:c[1], c[2]:c[3]])
+            #PIL.Image.fromarray(synth.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy(), 'RGB').save(f'proj.jpg')
             synth_features = vgg16(synth, resize_images=False, return_lpips=True)
             dist += (target - synth_features).square().sum()
 
@@ -159,10 +120,9 @@ def project2(
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
-        logprint(f'step {step+1:>4d}/{num_steps}: dist {dist:<4.2f} loss {float(loss):<5.2f}')
+        print(f'step {step+1:>4d}/{num_steps}: dist {dist:<4.2f} loss {float(loss):<5.2f}')
 
         # Save projected W for each optimization step.
-        #w_out[step] = w_opt.detach()[0]
         w_out[step] = ws.detach()[0]
 
         # Normalize noise.
@@ -171,29 +131,7 @@ def project2(
                 buf -= buf.mean()
                 buf *= buf.square().mean().rsqrt()
 
-    #return w_out.repeat([1, G.mapping.num_ws, 1])
-    return w_out
-
-#----------------------------------------------------------------------------
-
-def run_projection3(target_pil, q0, q1, q2, q3, device, G, vgg16, starting_wplus_space, target_short_name):
-    outdir = "./outdir"
-    seed = 303
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    target_uint8 = np.array(target_pil, dtype=np.uint8)
-    # Optimize projection.
-    start_time = perf_counter()
-    projected_w_steps = project2(
-        G, q0, q1, q2, q3, vgg16, starting_wplus_space,
-        target=torch.tensor(target_uint8.transpose([2, 0, 1]), device=device), # pylint: disable=not-callable
-        num_steps=2000,
-        device=device,
-        verbose=True,
-        target_short_name=target_short_name
-    )
-    print (f'Elapsed: {(perf_counter()-start_time):.1f} s')
-
+    projected_w_steps = w_out
     # Save final projected frame and W vector.
     #target_pil.save(f'{outdir}/{target_short_name}target.png')
     projected_w = projected_w_steps[-1]
@@ -203,46 +141,20 @@ def run_projection3(target_pil, q0, q1, q2, q3, device, G, vgg16, starting_wplus
     PIL.Image.fromarray(synth_image, 'RGB').save(f'{outdir}/{target_short_name}proj.png')
     np.savez(f'{outdir}/{target_short_name}.npz', w=projected_w.unsqueeze(0).cpu().numpy())
 
-#----------------------------------------------------------------------------
-def parse_args():
-    parser = ArgumentParser(add_help=False)
-    parser.add_argument("--num_threads", type=int, default=1)
-    parser.add_argument("--raw_dir", type=str, default="")
-    parser.add_argument("--saved_dir", type=str, default="")
-    args = parser.parse_args()
-    return args
-
 def chunks(lst, n):
     """Yield successive n-sized chunks from lst."""
     for i in range(0, len(lst), n):
         yield lst[i: i + n]
 
-def get_landmark2(filepath, predictor):
-    image = PIL.Image.open(filepath)
-    data = asarray(image)
-    faces = predictor.predict_jsons(data)
-    #faces = RetinaFace.detect_faces(filepath, threshold=0.5, model=predictor)
-    largest_face_size = 0
-    largest_face = None
-    for face in faces:
-        print(face['score'])        
-        print(face)
-        face_size = (face['bbox'][2] - face['bbox'][0]) * (
-                    face['bbox'][3] - face['bbox'][1])
-        if face_size > largest_face_size:
-            largest_face_size = face_size * face['score'] * face['score'] 
-            largest_face = face
-    lm = [[0, 0]] * 68
-    for i in range(36, 42):
-        lm[i] = largest_face['landmarks'][0]
-    for i in range(42, 48):
-        lm[i] = largest_face['landmarks'][1]
-    lm[48] = largest_face['landmarks'][3]
-    lm[54] = largest_face['landmarks'][4]
-
-    return np.array(lm)
-
-def quad_to_rect(Qx0, Qy0, Qx1, Qy1, Qx2, Qy2, Qx3, Qy3, x, y):
+def quad_to_rect(quad, x, y):
+    Qx0 = quad[0]
+    Qy0 = quad[1]
+    Qx1 = quad[2]
+    Qy1 = quad[3]
+    Qx2 = quad[4]
+    Qy2 = quad[5]
+    Qx3 = quad[6]
+    Qy3 = quad[7]
     ax = (x - Qx0) + (Qx1 - Qx0) * (y - Qy0) / (Qy0 - Qy1)
     a3x = (Qx3 - Qx0) + (Qx1 - Qx0) * (Qy3 - Qy0) / (Qy0 - Qy1)
     a2x = (Qx2 - Qx0) + (Qx1 - Qx0) * (Qy2 - Qy0) / (Qy0 - Qy1)
@@ -260,27 +172,29 @@ def quad_to_rect(Qx0, Qy0, Qx1, Qy1, Qx2, Qy2, Qx3, Qy3, x, y):
     m = (ay / a1y) + (1 - a2y / a1y) * (by - b1y * ay / a1y) / (b2y - b1y * a2y / a1y)
     return l, m
 
-def align_face(filepath, predictor, device, vgg16):
-    """
-    :param filepath: str
-    :return: PIL Image
-    """
-
-    # lm = get_landmark(filepath, predictor)
-    # print(lm)
-    lm = get_landmark2(filepath, predictor)
-    # print(lm)
-
-    lm_eye_left = lm[36:42]  # left-clockwise
-    lm_eye_right = lm[42:48]  # left-clockwise
-    lm_mouth_outer = lm[48:60]  # left-clockwise
-    # Calculate auxiliary vectors.
+def align_face(filepath, predictor, detector):    
+    img2 = dlib.load_rgb_image(filepath)
+    dets = detector(img2, 1)
+    shape = None
+    for k, d in enumerate(dets):
+        shape = predictor(img2, d)
+    if not shape:
+        raise Exception("Could not find face in image! Please try another image!")
+    t = list(shape.parts())
+    a = []
+    for tt in t:
+        a.append([tt.x, tt.y])
+    landmarks = np.array(a)
+    img = PIL.Image.open(filepath)
+    lm_eye_left = landmarks[36:42]  # left-clockwise
+    lm_eye_right = landmarks[42:48]  # left-clockwise
+    lm_mouth_outer = landmarks[48:60]  # left-clockwise
     eye_left = np.mean(lm_eye_left, axis=0)
     eye_right = np.mean(lm_eye_right, axis=0)
     eye_avg = (eye_left + eye_right) * 0.5
     eye_to_eye = eye_right - eye_left
-    mouth_left = lm_mouth_outer[0]
-    mouth_right = lm_mouth_outer[6]
+    mouth_left = np.asarray(lm_mouth_outer[0])
+    mouth_right = np.asarray(lm_mouth_outer[6])
     mouth_avg = (mouth_left + mouth_right) * 0.5
     eye_to_mouth = mouth_avg - eye_avg
     
@@ -289,185 +203,92 @@ def align_face(filepath, predictor, device, vgg16):
     x /= np.hypot(*x)
     x *= max(np.hypot(*eye_to_eye) * 2.0, np.hypot(*eye_to_mouth) * 1.8)
     y = np.flipud(x) * [-1, 1]
-    c = eye_avg + eye_to_mouth * 0.1
-    quad = np.stack([c - x - y, c - x + y, c + x + y, c + x - y])
-    qsize = np.hypot(*x) * 2
-
-    # read image
-    img = PIL.Image.open(filepath)
-
-    output_size = 1024
-    transform_size = 4096
-    enable_padding = False
-
+    center = eye_avg + eye_to_mouth * 0.1
+    quad = np.stack([center - x - y, center - x + y, center + x + y, center + x - y])
+    length_of_one_quad_side = np.hypot(*x) * 2
+    output_size = 1024    
     # Shrink.
-    img_before_resize = img
-    quad_before_resize = quad
-    qsize_before_resize = qsize
-    shrink = int(np.floor(qsize / output_size * 0.5))
-    if shrink > 1:
-        rsize = (int(np.rint(float(img.size[0]) / shrink)), int(np.rint(float(img.size[1]) / shrink)))
-        img = img.resize(rsize, PIL.Image.LANCZOS)
-        quad /= shrink
-        qsize /= shrink
+    shrink_multiplier = int(np.floor(length_of_one_quad_side / output_size * 0.5))
+    if shrink_multiplier > 1:
+        shrink_to_size = (int(np.rint(float(img.size[0]) / shrink_multiplier)), int(np.rint(float(img.size[1]) / shrink_multiplier)))
+        img = img.resize(shrink_to_size, PIL.Image.LANCZOS)
+        quad /= shrink_multiplier
+        length_of_one_quad_side /= shrink_multiplier
+        eye_left /= shrink_multiplier
+        eye_right /= shrink_multiplier
+        mouth_avg /= shrink_multiplier
 
     # Crop.
-    border = max(int(np.rint(qsize * 0.1)), 3)
     crop = (
         int(np.floor(min(quad[:, 0]))),
         int(np.floor(min(quad[:, 1]))),
         int(np.ceil(max(quad[:, 0]))),
         int(np.ceil(max(quad[:, 1]))),
-    )
+    )    
+    border = max(int(np.rint(length_of_one_quad_side * 0.1)), 3)
     crop = (
         max(crop[0] - border, 0),
         max(crop[1] - border, 0),
         min(crop[2] + border, img.size[0]),
         min(crop[3] + border, img.size[1]),
     )
-    if crop[2] - crop[0] < img.size[0] or crop[3] - crop[1] < img.size[1]:
+    crop_width = crop[2] - crop[0]
+    crop_height = crop[3] - crop[1]
+    if crop_width < img.size[0] or crop_height < img.size[1]:
         img = img.crop(crop)
         quad -= crop[0:2]
-
-    backup_quad = (
-        max(quad[0][0], 0),
-        max(quad[0][1], 0),
-        max(quad[1][0], 0),
-        min(quad[1][1], img.size[1]),
-        min(quad[2][0], img.size[0]),
-        min(quad[2][1], img.size[1]),
-        min(quad[3][0], img.size[0]),
-        max(quad[3][1], 0))
-
-    flat_quad = (quad + 0.5).flatten()
-    if enable_padding:
-        # Pad.
-        pad = (
-            int(np.floor(min(quad[:, 0]))),
-            int(np.floor(min(quad[:, 1]))),
-            int(np.ceil(max(quad[:, 0]))),
-            int(np.ceil(max(quad[:, 1]))),
-        )
-        pad = (
-            max(-pad[0] + border, 0),
-            max(-pad[1] + border, 0),
-            max(pad[2] - img.size[0] + border, 0),
-            max(pad[3] - img.size[1] + border, 0),
-        )
-        if max(pad) > border - 4:
-            pad = np.maximum(pad, int(np.rint(qsize * 0.3)))
-            img = np.pad(np.float32(img), ((pad[1], pad[3]), (pad[0], pad[2]), (0, 0)), "reflect")
-            h, w, _ = img.shape
-            y, x, _ = np.ogrid[:h, :w, :1]
-            mask = np.maximum(
-                1.0 - np.minimum(np.float32(x) / pad[0], np.float32(w - 1 - x) / pad[2]),
-                1.0 - np.minimum(np.float32(y) / pad[1], np.float32(h - 1 - y) / pad[3]),
-            )
-            blur = qsize * 0.02
-            img += (scipy.ndimage.gaussian_filter(img, [blur, blur, 0]) - img) * np.clip(mask * 3.0 + 1.0, 0.0, 1.0)
-            img += (np.median(img, axis=(0, 1)) - img) * np.clip(mask, 0.0, 1.0)
-            img = PIL.Image.fromarray(np.uint8(np.clip(np.rint(img), 0, 255)), "RGB")
-            quad += pad[:2]
+        eye_left -= crop[0:2]
+        eye_right -= crop[0:2]
+        mouth_avg -= crop[0:2]
 
     # Transform.    
+    flat_quad = (quad + 0.5).flatten()
+    transform_size = 4096
+    white_img = np.full([img.size[1], img.size[0], 3], 255, dtype = np.uint8)
+    white_img_pil = PIL.Image.fromarray(white_img)
+    new_white = white_img_pil.transform((transform_size, transform_size), PIL.Image.Transform.QUAD, flat_quad, PIL.Image.Resampling.BILINEAR)
+    small_white = new_white.resize((output_size, output_size), PIL.Image.Resampling.LANCZOS)
+    rotate_mask = np.array(small_white, dtype=np.uint8) / 255
     img = img.transform((transform_size, transform_size), PIL.Image.Transform.QUAD, flat_quad, PIL.Image.Resampling.BILINEAR)
-    l, m = quad_to_rect(flat_quad[0], flat_quad[1], flat_quad[2], flat_quad[3], flat_quad[4], flat_quad[5], flat_quad[6], flat_quad[7], backup_quad[0], backup_quad[1])
-    l = max(0, math.floor(l * output_size))
-    m = max(0, math.floor(m * output_size))
-    q0 = (l, m)
-    l, m = quad_to_rect(flat_quad[0], flat_quad[1], flat_quad[2], flat_quad[3], flat_quad[4], flat_quad[5], flat_quad[6], flat_quad[7], backup_quad[2], backup_quad[3])
-    l = max(0, math.floor(l * output_size))
-    m = min(output_size - 1, math.floor(m * output_size))
-    q1 = (l, m)
-    l, m = quad_to_rect(flat_quad[0], flat_quad[1], flat_quad[2], flat_quad[3], flat_quad[4], flat_quad[5], flat_quad[6], flat_quad[7], backup_quad[4], backup_quad[5])
-    l = min(output_size - 1, math.floor(l * output_size))
-    m = min(output_size - 1, math.floor(m * output_size))
-    q2 = (l, m)
-    l, m = quad_to_rect(flat_quad[0], flat_quad[1], flat_quad[2], flat_quad[3], flat_quad[4], flat_quad[5], flat_quad[6], flat_quad[7], backup_quad[6], backup_quad[7])
-    l = min(output_size - 1, math.floor(l * output_size))
-    m = max(0, math.floor(m * output_size))
-    q3 = (l, m)
-    print(q0, q1, q2, q3)
-    if output_size < transform_size:
-        img = img.resize((output_size, output_size), PIL.Image.Resampling.LANCZOS)
+    img = img.resize((output_size, output_size), PIL.Image.Resampling.LANCZOS)
 
+    l, m = quad_to_rect(flat_quad, eye_left[0], eye_left[1])
+    l = math.floor(l * output_size)
+    m = math.floor(m * output_size)
+    eyeleftp = (l, m)
+    
+    l, m = quad_to_rect(flat_quad, eye_right[0], eye_right[1])
+    l = math.floor(l * output_size)
+    m = math.floor(m * output_size)
+    eyerightp = (l, m)
+    
+    l, m = quad_to_rect(flat_quad, mouth_avg[0], mouth_avg[1])
+    l = math.floor(l * output_size)
+    m = math.floor(m * output_size)
+    mouthp = (l, m)
     # Save aligned image.
-    return img, q0, q1, q2, q3
+    return img, eyeleftp, eyerightp, mouthp, rotate_mask
 
-def extract_on_paths(file_paths, device, vgg16, G):
-    # predictor = dlib.shape_predictor(SHAPE_PREDICTOR_PATH)
-    os.environ["CUDA_VISIBLE_DEVICES"]="0"
-    #predictor = RetinaFace.build_model()
-    predictor = get_model("resnet50_2020-07-20", max_size=2048)
-    predictor.eval()
-    pid = mp.current_process().name
-    print("\t{} is starting to extract on #{} images".format(pid, len(file_paths)))
-    tot_count = len(file_paths)
-    count = 0
-    for file_path, res_path in file_paths:
-        count += 1
-        if count % 100 == 0:
-            print("{} done with {}/{}".format(pid, count, tot_count))
-        #try:
-        res, q0, q1, q2, q3 = align_face(file_path, predictor, device, vgg16)
-        res = res.convert("RGB")
-        os.makedirs(os.path.dirname(res_path), exist_ok=True)
-        #res.save(res_path)
-        #use restyle to get starting wplus_space
-        starting_wplus_space = torch.load(f'./mean.pt')
-        #find w+ space, by comparing q0-q3
-        run_projection3(res, q0, q1, q2, q3, device, G, vgg16, starting_wplus_space, target_short_name='target')
-        #except Exception:
-        #    continue
-    print("\tDone!")
-
-def getVgg16Device():
-    url = 'https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/metrics/vgg16.pt'
+if __name__ == "__main__":
     device = torch.device('cuda')
     network_pkl = "./ffhq.pkl"
     with dnnlib.util.open_url(network_pkl) as fp:
         G = legacy.load_network_pkl(fp)['G_ema'].requires_grad_(False).to(device) # type: ignore
-    with dnnlib.util.open_url(url) as f:
+    with dnnlib.util.open_url('https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/metrics/vgg16.pt') as f:
         vgg16 = torch.jit.load(f).eval().to(device)
-    return device, vgg16, G
+    os.environ["CUDA_VISIBLE_DEVICES"]="0"
+    #predictor = get_model("resnet50_2020-07-20", max_size=2048)
+    #predictor.eval()
+    predictor = dlib.shape_predictor('shape_predictor_68_face_landmarks.dat')
+    starting_wplus_space = torch.load(f'./mean.pt')
+    detector = dlib.get_frontal_face_detector()
 
-
-def run(args):
-    root_path = args.raw_dir
-    root_path = './raw'
-    out_crops_path = args.saved_dir
-    out_crops_path = './saved'
-    if not os.path.exists(out_crops_path):
-        os.makedirs(out_crops_path, exist_ok=True)
-
-    file_paths = []
-    for root, dirs, files in os.walk(root_path):
-        for file in files:
-            file_path = os.path.join(root, file)
-            fname = os.path.join(out_crops_path, os.path.relpath(file_path, root_path))
-            res_path = "{}.jpg".format(os.path.splitext(fname)[0])
-            if os.path.splitext(file_path)[1] == ".txt" or os.path.exists(res_path):
-                continue
-            file_paths.append((file_path, res_path))
-
-    file_chunks = list(chunks(file_paths, int(math.ceil(len(file_paths) / args.num_threads))))
-    pool = mp.Pool(args.num_threads)
-    print("Running on {} paths\nHere we goooo".format(len(file_paths)))
-    tic = time.time()
-
-    print('Loading networks...')
-    device, vgg16, G = getVgg16Device()
-
-    #pool.map(extract_on_paths, file_chunks)
-    extract_on_paths(file_paths, device, vgg16, G)
-    toc = time.time()
-    print("Mischief managed in {}s".format(toc - tic))
-
-if __name__ == "__main__":
-    args = parse_args()
-    run(args)
-    #ldir = '../restyle/data'
-    #target_short_names = os.listdir(ldir)
-    #run_projection2(target_short_names) # pylint: disable=no-value-for-parameter
-
-#----------------------------------------------------------------------------
+    target_short_name = '10187.jpg'
+    file_path = './raw/' + target_short_name
+    #try:
+    target_pil, eyeleftp, eyerightp, mouthp, rotate_mask = align_face(file_path, predictor, detector)
+    target_pil = target_pil.convert("RGB")
+    #find w+ space, by comparing q0-q3
+    project2(target_pil, eyeleftp, eyerightp, mouthp, rotate_mask, device, G, vgg16, starting_wplus_space, target_short_name)
+    #except Exception:
+    #    continue
