@@ -64,12 +64,15 @@ def project2(
     maxx = 1024
     miny = 0
     maxy = 1024
-    canvas = [miny, maxy, minx, maxx] #y_start,y_end,x_start,x_end
-    mouth = [max(mouthp[1]-110,miny), min(mouthp[1]+110,maxy), max(mouthp[0]-110,minx), min(mouthp[0]+110,maxx)]
+    canvas1 = [0, 512, 0, 512] #y_start,y_end,x_start,x_end
+    canvas2 = [512, 1024, 0, 512] #y_start,y_end,x_start,x_end
+    canvas3 = [0, 512, 512, 1024] #y_start,y_end,x_start,x_end
+    canvas4 = [512, 1024, 512, 1024] #y_start,y_end,x_start,x_end
+    mouth = [max(mouthp[1]-140,miny), min(mouthp[1]+80,maxy), max(mouthp[0]-110,minx), min(mouthp[0]+110,maxx)]
     left_eye = [max(eyeleftp[1]-80,miny), min(eyeleftp[1]+80,maxy), max(eyeleftp[0]-140,minx), min(eyeleftp[0]+80,maxx)]
     right_eye = [max(eyerightp[1]-80,miny), min(eyerightp[1]+80,maxy), max(eyerightp[0]-80,minx), min(eyerightp[0]+140,maxx)]
     coords = [mouth, left_eye, right_eye]
-    coords = [canvas, mouth, left_eye, right_eye]
+    coords = [canvas1, canvas2, canvas3, canvas4, mouth, left_eye, right_eye]
     targets = calcTargets(coords, target_images, vgg16)
     #starting_wplus_space = torch.load(f'../restyle/output/inference_coupled/{target_short_name}.pt')
     w_opt = starting_wplus_space.detach().clone().cuda()
@@ -285,10 +288,15 @@ if __name__ == "__main__":
 
     target_short_name = '10187.jpg'
     file_path = './raw/' + target_short_name
-    #try:
-    target_pil, eyeleftp, eyerightp, mouthp, rotate_mask = align_face(file_path, predictor, detector)
-    target_pil = target_pil.convert("RGB")
+    for target_short_name in os.listdir('./raw/'):
+        print(target_short_name)
+        if os.path.isfile(os.path.join('./outdir/', (target_short_name + '.npz'))):
+            continue
+        file_path = os.path.join('./raw/', target_short_name)
+        try:
+            target_pil, eyeleftp, eyerightp, mouthp, rotate_mask = align_face(file_path, predictor, detector)
+            target_pil = target_pil.convert("RGB")
     #find w+ space, by comparing q0-q3
-    project2(target_pil, eyeleftp, eyerightp, mouthp, rotate_mask, device, G, vgg16, starting_wplus_space, target_short_name)
-    #except Exception:
-    #    continue
+            project2(target_pil, eyeleftp, eyerightp, mouthp, rotate_mask, device, G, vgg16, starting_wplus_space, target_short_name)
+        except Exception:
+            continue
