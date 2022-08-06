@@ -10,7 +10,7 @@ import legacy
 import math
 import PIL.ImageFilter
 import dlib
-
+from retinaface.pre_trained_models import get_model
 
 def resize_image(image):
     newx = 224
@@ -42,9 +42,9 @@ def project2(
     regularize_noise_weight    = 1e5
 ):
     outdir = "./outdir"
-    seed = 303
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+    #seed = 303
+    #np.random.seed(seed)
+    #torch.manual_seed(seed)
     torch_mask = torch.tensor(rotate_mask.transpose([2, 0, 1]), device=device)
     target_pil.save(f'{outdir}/{target_short_name}target.jpg')
     target_uint8 = np.array(target_pil, dtype=np.uint8)
@@ -64,6 +64,7 @@ def project2(
     maxx = 1024
     miny = 0
     maxy = 1024
+    #canvas = [0, 1024, 0, 1024] #y_start,y_end,x_start,x_end
     canvas1 = [0, 512, 0, 512] #y_start,y_end,x_start,x_end
     canvas2 = [512, 1024, 0, 512] #y_start,y_end,x_start,x_end
     canvas3 = [0, 512, 512, 1024] #y_start,y_end,x_start,x_end
@@ -71,8 +72,9 @@ def project2(
     mouth = [max(mouthp[1]-140,miny), min(mouthp[1]+80,maxy), max(mouthp[0]-110,minx), min(mouthp[0]+110,maxx)]
     left_eye = [max(eyeleftp[1]-80,miny), min(eyeleftp[1]+80,maxy), max(eyeleftp[0]-140,minx), min(eyeleftp[0]+80,maxx)]
     right_eye = [max(eyerightp[1]-80,miny), min(eyerightp[1]+80,maxy), max(eyerightp[0]-80,minx), min(eyerightp[0]+140,maxx)]
-    coords = [mouth, left_eye, right_eye]
+    #coords = [mouth, left_eye, right_eye]
     coords = [canvas1, canvas2, canvas3, canvas4, mouth, left_eye, right_eye]
+    #coords = [[512, 768, 0, 256], mouth, left_eye, right_eye]
     targets = calcTargets(coords, target_images, vgg16)
     #starting_wplus_space = torch.load(f'../restyle/output/inference_coupled/{target_short_name}.pt')
     w_opt = starting_wplus_space.detach().clone().cuda()
@@ -116,8 +118,9 @@ def project2(
                 if noise.shape[2] <= 8:
                     break
                 noise = F.avg_pool2d(noise, kernel_size=2)
-        loss2 = (ws - starting_wplus_space).square().sum() * 0.0001
+        loss2 = (ws - starting_wplus_space).square().sum() * 0.00010
         loss = loss2 + dist + (reg_loss * regularize_noise_weight)
+        #loss = dist + (reg_loss * regularize_noise_weight)
 
         # Step
         optimizer.zero_grad(set_to_none=True)
@@ -175,19 +178,49 @@ def quad_to_rect(quad, x, y):
     m = (ay / a1y) + (1 - a2y / a1y) * (by - b1y * ay / a1y) / (b2y - b1y * a2y / a1y)
     return l, m
 
-def align_face(filepath, predictor, detector):    
+def get_landmarks_retinaFace(filepath, predictorRetinaFace):
+    image = PIL.Image.open(filepath)
+    data = np.asarray(image)
+    faces = predictorRetinaFace.predict_jsons(data)
+    #faces = RetinaFace.detect_faces(filepath, threshold=0.5, model=predictor)
+    largest_face_size = 0
+    largest_face = None
+    if len(faces) == 0:
+        return None
+    for face in faces:
+        print(face['score'])        
+        print(face)
+        face_size = (face['bbox'][2] - face['bbox'][0]) * (
+                    face['bbox'][3] - face['bbox'][1])
+        if face_size > largest_face_size:
+            largest_face_size = face_size * face['score'] * face['score'] 
+            largest_face = face
+    lm = [[0, 0]] * 68
+    for i in range(36, 42):
+        lm[i] = largest_face['landmarks'][0]
+    for i in range(42, 48):
+        lm[i] = largest_face['landmarks'][1]
+    lm[48] = largest_face['landmarks'][3]
+    lm[54] = largest_face['landmarks'][4]
+    return lm
+
+def get_landmarks(filepath, predictor, detector, predictorRetinaFace):    
     img2 = dlib.load_rgb_image(filepath)
     dets = detector(img2, 1)
     shape = None
     for k, d in enumerate(dets):
         shape = predictor(img2, d)
     if not shape:
-        raise Exception("Could not find face in image! Please try another image!")
+        landmarks = get_landmarks_retinaFace(filepath, predictorRetinaFace)
+        return get_landmarks_retinaFace(filepath, predictorRetinaFace)
     t = list(shape.parts())
     a = []
     for tt in t:
         a.append([tt.x, tt.y])
     landmarks = np.array(a)
+    return landmarks
+
+def align_face(filepath, landmarks):
     img = PIL.Image.open(filepath)
     lm_eye_left = landmarks[36:42]  # left-clockwise
     lm_eye_right = landmarks[42:48]  # left-clockwise
@@ -280,23 +313,27 @@ if __name__ == "__main__":
     with dnnlib.util.open_url('https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/metrics/vgg16.pt') as f:
         vgg16 = torch.jit.load(f).eval().to(device)
     os.environ["CUDA_VISIBLE_DEVICES"]="0"
-    #predictor = get_model("resnet50_2020-07-20", max_size=2048)
-    #predictor.eval()
+    predictorRetinaFace = get_model("resnet50_2020-07-20", max_size=2048)
+    predictorRetinaFace.eval()
     predictor = dlib.shape_predictor('shape_predictor_68_face_landmarks.dat')
     starting_wplus_space = torch.load(f'./mean.pt')
     detector = dlib.get_frontal_face_detector()
 
-    target_short_name = '10187.jpg'
-    file_path = './raw/' + target_short_name
+    #target_short_name = '10019.jpg'
+    #file_path = './raw/' + target_short_name
     for target_short_name in os.listdir('./raw/'):
         print(target_short_name)
         if os.path.isfile(os.path.join('./outdir/', (target_short_name + '.npz'))):
             continue
         file_path = os.path.join('./raw/', target_short_name)
-        try:
-            target_pil, eyeleftp, eyerightp, mouthp, rotate_mask = align_face(file_path, predictor, detector)
-            target_pil = target_pil.convert("RGB")
-    #find w+ space, by comparing q0-q3
-            project2(target_pil, eyeleftp, eyerightp, mouthp, rotate_mask, device, G, vgg16, starting_wplus_space, target_short_name)
-        except Exception:
+        #try:
+        landmarks = get_landmarks(file_path, predictor, detector, predictorRetinaFace)
+        if landmarks is None:
+            print("Could not find face in image! Please try another image!")
+            #raise Exception("Could not find face in image! Please try another image!")
             continue
+        target_pil, eyeleftp, eyerightp, mouthp, rotate_mask = align_face(file_path, landmarks)        
+        target_pil = target_pil.convert("RGB")
+        project2(target_pil, eyeleftp, eyerightp, mouthp, rotate_mask, device, G, vgg16, starting_wplus_space, target_short_name)
+        #except Exception:
+        #    continue
