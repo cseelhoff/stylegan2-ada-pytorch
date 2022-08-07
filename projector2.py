@@ -46,7 +46,7 @@ def project2(
     #np.random.seed(seed)
     #torch.manual_seed(seed)
     torch_mask = torch.tensor(rotate_mask.transpose([2, 0, 1]), device=device)
-    target_pil.save(f'{outdir}/{target_short_name}target.jpg')
+    target_pil.save(f'{outdir}/{target_short_name}.blurtarget.jpg')
     target_uint8 = np.array(target_pil, dtype=np.uint8)
     target=torch.tensor(target_uint8.transpose([2, 0, 1]), device=device)
     target=torch.mul(target, torch_mask)
@@ -118,7 +118,7 @@ def project2(
                 if noise.shape[2] <= 8:
                     break
                 noise = F.avg_pool2d(noise, kernel_size=2)
-        loss2 = (ws - starting_wplus_space).square().sum() * 0.00010
+        loss2 = (ws - starting_wplus_space).square().sum() * 0.00001
         loss = loss2 + dist + (reg_loss * regularize_noise_weight)
         #loss = dist + (reg_loss * regularize_noise_weight)
 
@@ -144,8 +144,8 @@ def project2(
     synth_image = G.synthesis(projected_w.unsqueeze(0), noise_mode='const')
     synth_image = (synth_image + 1) * (255/2)
     synth_image = synth_image.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
-    PIL.Image.fromarray(synth_image, 'RGB').save(f'{outdir}/{target_short_name}proj.png')
-    np.savez(f'{outdir}/{target_short_name}.npz', w=projected_w.unsqueeze(0).cpu().numpy())
+    PIL.Image.fromarray(synth_image, 'RGB').save(f'{outdir}/{target_short_name}.blurproj.png')
+    np.savez(f'{outdir}/{target_short_name}.blur.npz', w=projected_w.unsqueeze(0).cpu().numpy())
 
 def chunks(lst, n):
     """Yield successive n-sized chunks from lst."""
@@ -286,6 +286,7 @@ def align_face(filepath, landmarks):
     small_white = new_white.resize((output_size, output_size), PIL.Image.Resampling.LANCZOS)
     rotate_mask = np.array(small_white, dtype=np.uint8) / 255
     img = img.transform((transform_size, transform_size), PIL.Image.Transform.QUAD, flat_quad, PIL.Image.Resampling.BILINEAR)
+    img = img.filter(PIL.ImageFilter.GaussianBlur(radius = 10))
     img = img.resize((output_size, output_size), PIL.Image.Resampling.LANCZOS)
 
     l, m = quad_to_rect(flat_quad, eye_left[0], eye_left[1])
@@ -319,21 +320,23 @@ if __name__ == "__main__":
     starting_wplus_space = torch.load(f'./mean.pt')
     detector = dlib.get_frontal_face_detector()
 
-    #target_short_name = '10019.jpg'
+    target_short_name = '10207.jpg'
     #file_path = './raw/' + target_short_name
     for target_short_name in os.listdir('./raw/'):
         print(target_short_name)
-        if os.path.isfile(os.path.join('./outdir/', (target_short_name + '.npz'))):
+        if os.path.isfile(os.path.join('./outdir/', (target_short_name + '.blur.npz'))):
+            print('Exists')
             continue
         file_path = os.path.join('./raw/', target_short_name)
-        #try:
-        landmarks = get_landmarks(file_path, predictor, detector, predictorRetinaFace)
-        if landmarks is None:
-            print("Could not find face in image! Please try another image!")
-            #raise Exception("Could not find face in image! Please try another image!")
+        try:
+            landmarks = get_landmarks(file_path, predictor, detector, predictorRetinaFace)
+            if landmarks is None:
+                print("Could not find face in image! Please try another image!")
+                #raise Exception("Could not find face in image! Please try another image!")
+                continue
+            target_pil, eyeleftp, eyerightp, mouthp, rotate_mask = align_face(file_path, landmarks)        
+            target_pil = target_pil.convert("RGB")
+            project2(target_pil, eyeleftp, eyerightp, mouthp, rotate_mask, device, G, vgg16, starting_wplus_space, target_short_name)
+        except Exception:
+            print('Exception')
             continue
-        target_pil, eyeleftp, eyerightp, mouthp, rotate_mask = align_face(file_path, landmarks)        
-        target_pil = target_pil.convert("RGB")
-        project2(target_pil, eyeleftp, eyerightp, mouthp, rotate_mask, device, G, vgg16, starting_wplus_space, target_short_name)
-        #except Exception:
-        #    continue
