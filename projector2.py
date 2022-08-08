@@ -34,9 +34,9 @@ def calcTargets(coords, target_images, vgg16, size=224):
 def project2(
     target_pil, eyeleftp, eyerightp, mouthp, rotate_mask,
     device: torch.device, G, vgg16, w_opt, w_stds, target_short_name: str, preview_label, image_container,
-    num_steps                  = 300,
+    num_steps                  = 1000,
     initial_learning_rate      = 0.1,
-    initial_noise_factor       = 0.001, #.05
+    initial_noise_factor       = 0.05, #.05
     lr_rampdown_length         = 0.25,
     lr_rampup_length           = 0.05,
     noise_ramp_length          = 0.75,
@@ -68,8 +68,6 @@ def project2(
     coords = [canvas1, canvas2, canvas3, canvas4, mouth, left_eye, right_eye]
     target_images = target.unsqueeze(0).to(device).to(torch.float32)
     targets = calcTargets(coords, target_images, vgg16)
-    targets32 = calcTargets(coords, target_images, vgg16, 32)
-    targets64 = calcTargets(coords, target_images, vgg16, 64)
     optimizer = torch.optim.Adam([w_opt] + list(noise_bufs.values()), betas=(0.9, 0.999), lr=initial_learning_rate)
     w_out = torch.zeros([num_steps] + list(w_opt.shape[1:]), dtype=torch.float32, device=device)
 
@@ -89,6 +87,20 @@ def project2(
             param_group['lr'] = lr
         w_noise = torch.randn_like(w_opt) * w_noise_scale
         ws = ((w_opt + w_noise) * w_stds) + G.mapping.w_avg
+        
+        #ws[0][6] = G.mapping.w_avg
+        #ws[0][7] = G.mapping.w_avg
+        #ws[0][8] = G.mapping.w_avg
+        #ws[0][9] = G.mapping.w_avg
+        #ws[0][10] = G.mapping.w_avg
+        #ws[0][11] = G.mapping.w_avg
+        #ws[0][12] = G.mapping.w_avg
+        #ws[0][13] = G.mapping.w_avg
+        #ws[0][14] = G.mapping.w_avg
+        #ws[0][15] = G.mapping.w_avg
+        #ws[0][16] = G.mapping.w_avg
+        #ws[0][17] = G.mapping.w_avg
+
         synth_images = G.synthesis(ws, noise_mode='const')
         synth_images = (synth_images + 1) * (255/2)
 
@@ -98,12 +110,11 @@ def project2(
         preview_label.itemconfig(image_container, image=photo_image2)
         preview_label.update()
 
-        dist = 0
-        
-        for (c, target) in zip(coords, targets64):
+        dist = 0        
+        for (c, target) in zip(coords, targets):
             synth_image_clone = synth_images.clone()
             synth_image_clone = torch.mul(synth_image_clone, torch_mask)
-            synth = resize_image(synth_image_clone[0:1, 0:3, c[0]:c[1], c[2]:c[3]], size=64)
+            synth = resize_image(synth_image_clone[0:1, 0:3, c[0]:c[1], c[2]:c[3]])
             synth_features = vgg16(synth, resize_images=False, return_lpips=True)
             dist += (target - synth_features).square().sum()
 
@@ -117,7 +128,7 @@ def project2(
                 if noise.shape[2] <= 8:
                     break
                 noise = F.avg_pool2d(noise, kernel_size=2)
-        loss2 = w_opt[0][7:18].square().sum() * 10
+        loss2 = w_opt[0][0:18].square().sum() * 0.00001
         loss = loss2 + dist + (reg_loss * regularize_noise_weight)
 
         # Step
@@ -237,6 +248,7 @@ def project1(preview_label, image_container):
     w_opt = (G.mapping(torch.randn([1,G.mapping.z_dim], device=device), None, truncation_psi=0.0001) - G.mapping.w_avg) / w_stds
     target_short_names = os.listdir('./raw/')
     target_short_names = ['mean.png']
+    target_short_names = ['10316.jpg']
     target_short_names.sort()
 
     for target_short_name in target_short_names:
@@ -327,7 +339,7 @@ def align_face(filepath, landmarks):
     small_white = new_white.resize((output_size, output_size), PIL.Image.Resampling.LANCZOS)
     rotate_mask = np.array(small_white, dtype=np.uint8) / 255
     img = img.transform((transform_size, transform_size), PIL.Image.Transform.QUAD, flat_quad, PIL.Image.Resampling.BILINEAR)
-    img = img.filter(PIL.ImageFilter.GaussianBlur(radius = 20))
+    #img = img.filter(PIL.ImageFilter.GaussianBlur(radius = 20))
     img = img.resize((output_size, output_size), PIL.Image.Resampling.LANCZOS)
 
     l, m = quad_to_rect(flat_quad, eye_left[0], eye_left[1])
