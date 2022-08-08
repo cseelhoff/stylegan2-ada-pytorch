@@ -17,7 +17,9 @@ positive = None
 def load_npz_func():
     npz_dir = npz_dir_entry.get()
     a = 0
-    for file_name in os.listdir(npz_dir):
+    file_names = os.listdir(npz_dir)
+    file_names.sort()
+    for file_name in file_names:
         if file_name.endswith(".npz"):
             file_path = os.path.join(npz_dir, file_name)
             if file_path not in models.keys():
@@ -124,7 +126,26 @@ def get_positive():
         #max_stddev = torch.maximum(pos_std, neg_std)
         
         diff = pos_mean - neg_mean
+        adiff = torch.abs(diff)
         #std_devs = diff / max_stddev
+        #diff[0] *= 0
+        #diff[1] *= 0
+        #diff[2] *= 0
+        #diff[3] *= 0
+        #diff[4] *= 0
+        #diff[5] *= 0
+        #diff[6] *= 0
+        #diff[7] *= 0
+        #diff[8] *= 0
+        #diff[9] *= 0
+        #diff[10] *= 0
+        #diff[11] *= 0
+        #diff[12] *= 0
+        #diff[13] *= 0
+        #diff[14] *= 0
+        #diff[15] *= 0
+        #diff[16] *= 0
+        #diff[17] *= 0
         latent_code = latent_code + (diff * std_slider.get())
 
         #latent_code = torch.where(logical_or, latent_code,
@@ -181,12 +202,12 @@ neg_slider.bind('<B1-Motion>', slider_move)
 neg_slider.bind('<ButtonRelease-1>', slider_move)
 neg_slider.set(1)
 neg_slider.pack(side=TOP)
-mul_slider = Scale(left_toolbar, from_=-2, to=2, resolution=0.01, orient=HORIZONTAL, length=300)
+mul_slider = Scale(left_toolbar, from_=-3, to=3, resolution=0.01, orient=HORIZONTAL, length=300)
 mul_slider.bind('<B1-Motion>', slider_move)
 mul_slider.bind('<ButtonRelease-1>', slider_move)
 mul_slider.set(1)
 mul_slider.pack(side=TOP)
-std_slider = Scale(left_toolbar, from_=-2, to=2, resolution=0.01, orient=HORIZONTAL, length=300)
+std_slider = Scale(left_toolbar, from_=-3, to=3, resolution=0.01, orient=HORIZONTAL, length=300)
 std_slider.bind('<B1-Motion>', slider_move)
 std_slider.bind('<ButtonRelease-1>', slider_move)
 std_slider.set(1)
