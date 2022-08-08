@@ -128,7 +128,7 @@ def project2(
                 if noise.shape[2] <= 8:
                     break
                 noise = F.avg_pool2d(noise, kernel_size=2)
-        loss2 = w_opt[0][0:18].square().sum() * 0.00001
+        loss2 = w_opt[0][6:18].square().sum() * 0.0001
         loss = loss2 + dist + (reg_loss * regularize_noise_weight)
 
         # Step
@@ -247,8 +247,8 @@ def project1(preview_label, image_container):
     w_stds = G.mapping(z_samples, None).std(0)
     w_opt = (G.mapping(torch.randn([1,G.mapping.z_dim], device=device), None, truncation_psi=0.0001) - G.mapping.w_avg) / w_stds
     target_short_names = os.listdir('./raw/')
-    target_short_names = ['mean.png']
-    target_short_names = ['10316.jpg']
+    #target_short_names = ['mean.png']
+    #target_short_names = ['10003.jpg']
     target_short_names.sort()
 
     for target_short_name in target_short_names:
