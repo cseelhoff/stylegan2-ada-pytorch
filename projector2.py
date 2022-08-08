@@ -14,18 +14,18 @@ import dlib
 from retinaface.pre_trained_models import get_model
 import tkinter
     
-def resize_image(image):
-    newx = 224
-    newy = 224
+def resize_image(image, size=224):
+    newx = size
+    newy = size
     if image.shape[2] > newx or image.shape[3] > newy:
         image = F.interpolate(image, size=(newx, newy), mode='area')    
     return image
 
-def calcTargets(coords, target_images, vgg16):
+def calcTargets(coords, target_images, vgg16, size=224):
     targets = []
     i = 0
     for c in coords:
-        target = resize_image(target_images[0:1, 0:3, c[0]:c[1], c[2]:c[3]])
+        target = resize_image(target_images[0:1, 0:3, c[0]:c[1], c[2]:c[3]].clone(), size)
         PIL.Image.fromarray(target.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy(), 'RGB').save(f'proj{i}.jpg')
         targets.append(vgg16(target, resize_images=False, return_lpips=True))
         i += 1
@@ -34,9 +34,9 @@ def calcTargets(coords, target_images, vgg16):
 def project2(
     target_pil, eyeleftp, eyerightp, mouthp, rotate_mask,
     device: torch.device, G, vgg16, w_opt, w_stds, target_short_name: str, preview_label, image_container,
-    num_steps                  = 1000,
+    num_steps                  = 300,
     initial_learning_rate      = 0.1,
-    initial_noise_factor       = 1, #0.05,
+    initial_noise_factor       = 0.001, #.05
     lr_rampdown_length         = 0.25,
     lr_rampup_length           = 0.05,
     noise_ramp_length          = 0.75,
@@ -47,25 +47,17 @@ def project2(
     #np.random.seed(seed)
     #torch.manual_seed(seed)
     torch_mask = torch.tensor(rotate_mask.transpose([2, 0, 1]), device=device)
-    #target_pil.save(f'{outdir}/{target_short_name}.blurtarget.jpg')
     target_pil.save(f'{outdir}/{target_short_name}.target.jpg')
     target_uint8 = np.array(target_pil, dtype=np.uint8)
     target=torch.tensor(target_uint8.transpose([2, 0, 1]), device=device)
     target=torch.mul(target, torch_mask)
     assert target.shape == (G.img_channels, G.img_resolution, G.img_resolution)
-    #G = copy.deepcopy(G).eval().requires_grad_(False).to(device) 
-    #z_samples = np.random.RandomState(123).randn(w_avg_samples, G.z_dim)
-    #w_samples = G.mapping(torch.from_numpy(z_samples).to(device), None)  # [N, L, C]
-    #w_samples = w_samples[:, :1, :].cpu().numpy().astype(np.float32)       # [N, 1, C]
-    #w_avg = np.mean(w_samples, axis=0, keepdims=True)      # [1, 1, C]
-    #w_std = (np.sum((w_samples - w_avg) ** 2) / w_avg_samples) ** 0.5
     noise_bufs = { name: buf for (name, buf) in G.synthesis.named_buffers() if 'noise_const' in name }
     
     minx = 0
     maxx = 1024
     miny = 0
     maxy = 1024
-    #canvas = [0, 1024, 0, 1024] #y_start,y_end,x_start,x_end
     canvas1 = [0, 512, 0, 512] #y_start,y_end,x_start,x_end
     canvas2 = [512, 1024, 0, 512] #y_start,y_end,x_start,x_end
     canvas3 = [0, 512, 512, 1024] #y_start,y_end,x_start,x_end
@@ -73,19 +65,14 @@ def project2(
     mouth = [max(mouthp[1]-140,miny), min(mouthp[1]+80,maxy), max(mouthp[0]-110,minx), min(mouthp[0]+110,maxx)]
     left_eye = [max(eyeleftp[1]-80,miny), min(eyeleftp[1]+80,maxy), max(eyeleftp[0]-140,minx), min(eyeleftp[0]+80,maxx)]
     right_eye = [max(eyerightp[1]-80,miny), min(eyerightp[1]+80,maxy), max(eyerightp[0]-80,minx), min(eyerightp[0]+140,maxx)]
-    #coords = [mouth, left_eye, right_eye]
     coords = [canvas1, canvas2, canvas3, canvas4, mouth, left_eye, right_eye]
-    #coords = [[512, 768, 0, 256], mouth, left_eye, right_eye]
     target_images = target.unsqueeze(0).to(device).to(torch.float32)
     targets = calcTargets(coords, target_images, vgg16)
-    #starting_wplus_space = torch.load(f'../restyle/output/inference_coupled/{target_short_name}.pt')
-
-    #w_opt = starting_wplus_space.detach().clone().cuda()
-    #w_opt.requires_grad = True
+    targets32 = calcTargets(coords, target_images, vgg16, 32)
+    targets64 = calcTargets(coords, target_images, vgg16, 64)
     optimizer = torch.optim.Adam([w_opt] + list(noise_bufs.values()), betas=(0.9, 0.999), lr=initial_learning_rate)
     w_out = torch.zeros([num_steps] + list(w_opt.shape[1:]), dtype=torch.float32, device=device)
 
-    #photo_image2s = []
     # Init noise.
     for buf in noise_bufs.values():
         buf[:] = torch.randn_like(buf)
@@ -101,7 +88,6 @@ def project2(
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
         w_noise = torch.randn_like(w_opt) * w_noise_scale
-        #ws = w_opt + w_noise
         ws = ((w_opt + w_noise) * w_stds) + G.mapping.w_avg
         synth_images = G.synthesis(ws, noise_mode='const')
         synth_images = (synth_images + 1) * (255/2)
@@ -113,11 +99,11 @@ def project2(
         preview_label.update()
 
         dist = 0
-        for (c, target) in zip(coords, targets):
+        
+        for (c, target) in zip(coords, targets64):
             synth_image_clone = synth_images.clone()
             synth_image_clone = torch.mul(synth_image_clone, torch_mask)
-            synth = resize_image(synth_image_clone[0:1, 0:3, c[0]:c[1], c[2]:c[3]])
-            #PIL.Image.fromarray(synth.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy(), 'RGB').save(f'proj.jpg')
+            synth = resize_image(synth_image_clone[0:1, 0:3, c[0]:c[1], c[2]:c[3]], size=64)
             synth_features = vgg16(synth, resize_images=False, return_lpips=True)
             dist += (target - synth_features).square().sum()
 
@@ -131,9 +117,8 @@ def project2(
                 if noise.shape[2] <= 8:
                     break
                 noise = F.avg_pool2d(noise, kernel_size=2)
-        loss2 = w_opt.square().sum() * 0.001
+        loss2 = w_opt[0][7:18].square().sum() * 10
         loss = loss2 + dist + (reg_loss * regularize_noise_weight)
-        #loss = dist + (reg_loss * regularize_noise_weight)
 
         # Step
         optimizer.zero_grad(set_to_none=True)
@@ -144,14 +129,6 @@ def project2(
         # Save projected W for each optimization step.
         w_out[step] = ws.detach()[0]
 
-        #synth_image2 = G.synthesis(w_out[step].unsqueeze(0), noise_mode='const')
-        #synth_image2 = (synth_image2 + 1) * (255/2)
-        #synth_image2 = synth_image2.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
-        #image2 = PIL.Image.fromarray(synth_image2, 'RGB')
-        #photo_image2 = PIL.ImageTk.PhotoImage(image2)
-        #preview_label.itemconfig(image_container, image=photo_image2)
-        #preview_label.update()
-
         # Normalize noise.
         with torch.no_grad():
             for buf in noise_bufs.values():
@@ -159,15 +136,11 @@ def project2(
                 buf *= buf.square().mean().rsqrt()
 
     projected_w_steps = w_out
-    # Save final projected frame and W vector.
-    #target_pil.save(f'{outdir}/{target_short_name}target.png')
     projected_w = projected_w_steps[-1]
     synth_image = G.synthesis(projected_w.unsqueeze(0), noise_mode='const')
     synth_image = (synth_image + 1) * (255/2)
     synth_image = synth_image.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
-    #PIL.Image.fromarray(synth_image, 'RGB').save(f'{outdir}/{target_short_name}.blurproj.png')
     PIL.Image.fromarray(synth_image, 'RGB').save(f'{outdir}/{target_short_name}.proj.png')
-    #np.savez(f'{outdir}/{target_short_name}.blur.npz', w=projected_w.unsqueeze(0).cpu().numpy())
     np.savez(f'{outdir}/{target_short_name}.npz', w=projected_w.unsqueeze(0).cpu().numpy())
 
 def chunks(lst, n):
@@ -243,7 +216,6 @@ def get_landmarks(filepath, predictor, detector, predictorRetinaFace):
     landmarks = np.array(a)
     return landmarks
 
-
 def project1(preview_label, image_container):
     device = torch.device('cuda')
     network_pkl = "./ffhq.pkl"
@@ -261,28 +233,14 @@ def project1(preview_label, image_container):
     w_avg_samples = 100000
     print(f'Computing W midpoint and stddev using {w_avg_samples} samples...')    
     z_samples = torch.randn([w_avg_samples, G.mapping.z_dim], device=device)
-    #w_samples = G.mapping(z_samples, None)
-    #w_samples = w_samples[:, :1, :].cpu().numpy().astype(np.float32)
     w_stds = G.mapping(z_samples, None).std(0)
-    
-    #w_avg = np.mean(w_samples, axis=0, keepdims=True)      # [1, 1, C]
-    #w_std = (np.sum((w_samples - w_avg) ** 2) / w_avg_samples) ** 0.5
-    
     w_opt = (G.mapping(torch.randn([1,G.mapping.z_dim], device=device), None, truncation_psi=0.0001) - G.mapping.w_avg) / w_stds
-    
-    #mean_images = G.synthesis(w_opt * w_stds + G.mapping.w_avg)
-    #mean_images = (mean_images + 1) * (255/2)
-    #PIL.Image.fromarray(mean_images.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy(), 'RGB').save(f'mean.png')
-
-    #target_short_name = '10316.jpg'
-    #file_path = './raw/' + target_short_name
     target_short_names = os.listdir('./raw/')
-    target_short_names = ['10316.jpg']
+    target_short_names = ['mean.png']
     target_short_names.sort()
 
     for target_short_name in target_short_names:
         print(target_short_name)
-        #if os.path.isfile(os.path.join('./outdir/', (target_short_name + '.blur.npz'))):
         if os.path.isfile(os.path.join('./outdir/', (target_short_name + '.npz'))):
             print('Exists')
             continue
@@ -302,7 +260,6 @@ def project1(preview_label, image_container):
         #except Exception:
         #    print('Exception')
         #    continue
-
 
 def align_face(filepath, landmarks):
     img = PIL.Image.open(filepath)
@@ -370,7 +327,7 @@ def align_face(filepath, landmarks):
     small_white = new_white.resize((output_size, output_size), PIL.Image.Resampling.LANCZOS)
     rotate_mask = np.array(small_white, dtype=np.uint8) / 255
     img = img.transform((transform_size, transform_size), PIL.Image.Transform.QUAD, flat_quad, PIL.Image.Resampling.BILINEAR)
-    #img = img.filter(PIL.ImageFilter.GaussianBlur(radius = 10))
+    img = img.filter(PIL.ImageFilter.GaussianBlur(radius = 20))
     img = img.resize((output_size, output_size), PIL.Image.Resampling.LANCZOS)
 
     l, m = quad_to_rect(flat_quad, eye_left[0], eye_left[1])
