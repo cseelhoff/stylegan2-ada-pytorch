@@ -13,7 +13,6 @@ models = {}
 frames = {}
 positive = None
 
-
 def load_npz_func():
     npz_dir = npz_dir_entry.get()
     a = 0
@@ -34,7 +33,7 @@ def load_npz_func():
                 img_orig2 = torchvision.utils.make_grid(img_orig2, normalize=True, scale_each=True, range=(-1, 1))
                 img_orig2 = torch.squeeze(img_orig2)
                 image2 = transform(img_orig2)
-                image2 = image2.resize((256, 256), Image.ANTIALIAS)
+                image2 = image2.resize((256, 256), Image.Resampling.LANCZOS)
                 photo_image2 = ImageTk.PhotoImage(image2)
                 frame = Frame(window, background='black', padx=5, pady=5)
                 label = Label(frame, image=photo_image2, background="black", padx=1, pady=1)
@@ -54,13 +53,13 @@ def mouse_click(f):
         f['background'] = '#000fff000'
     else:
         f['background'] = 'black'
-    get_positive()
+    reload_previews()
 
 
 def middle_click(f):
     global orig_latent
     orig_latent = models[frames[f]]
-    get_positive()
+    reload_previews()
 
 
 def right_click(f):
@@ -68,15 +67,16 @@ def right_click(f):
         f['background'] = 'red'
     else:
         f['background'] = 'black'
-    get_positive()
+    reload_previews()
 
 
 def slider_move(e):
-    get_positive()
+    reload_previews()
 
 
-def get_positive():
+def get_latent():
     latent_code = orig_latent.clone()
+
     positive_weights = []
     for frame, file_path in frames.items():
         if frame['background'] == '#000fff000':
@@ -87,90 +87,54 @@ def get_positive():
     for i in range(len(positive_weights)):
         tensor_pos_weights[i] = positive_weights[i]
     #torch.cat(positive_weights, out=tensor_pos_weights)
-
-    pos_std, pos_mean = torch.std_mean(tensor_pos_weights, unbiased=False, axis=0)
-    pos_std *= pos_slider.get()
-    pos_min = pos_mean - pos_std
-    pos_max = pos_mean + pos_std
-
-    neg_mean = pos_mean
+    _, pos_mean = torch.std_mean(tensor_pos_weights, unbiased=False, axis=0)
+    
     negative_weights = []
     for frame, file_path in frames.items():
         if frame['background'] == 'red':
             negative_weights.append(models[file_path])
-    if (len(negative_weights)) > 0:
-        tensor_neg_weights = torch.Tensor(len(negative_weights), 18, 512).cuda()
-        for i in range(len(negative_weights)):
-            tensor_neg_weights[i] = negative_weights[i]
-        #torch.cat(negative_weights, out=tensor_neg_weights)
-        neg_std, neg_mean = torch.std_mean(tensor_neg_weights, unbiased=False, axis=0)
-        neg_std *= neg_slider.get()
-        #neg_min = neg_mean - neg_std
-        #neg_max = neg_mean + neg_std
+    if (len(negative_weights)) == 0:
+        negative_weights.append(latent_code)
+    tensor_neg_weights = torch.Tensor(len(negative_weights), 18, 512).cuda()
+    for i in range(len(negative_weights)):
+        tensor_neg_weights[i] = negative_weights[i]
+    #torch.cat(negative_weights, out=tensor_neg_weights)
+    _, neg_mean = torch.std_mean(tensor_neg_weights, unbiased=False, axis=0)
 
-        #pos_min_gt_neg_min = torch.where(pos_min > neg_min, True, False)
-        #pos_max_lt_neg_max = torch.where(pos_max < neg_max, True, False)
-        #cond1 = torch.logical_and(pos_min_gt_neg_min, pos_max_lt_neg_max)
-        #pos_min_lt_neg_min = torch.where(pos_min < neg_min, True, False)
-        #pos_max_gt_neg_max = torch.where(pos_max > neg_max, True, False)
-        #latent_code_lt_pos_mean = torch.where(latent_code < pos_mean, True, False)
-        #latent_code_gt_pos_mean = torch.where(latent_code >= pos_mean, True, False)
-        #cond2 = torch.logical_and(pos_min_lt_neg_min, pos_max_gt_neg_max)
-        #logical_or = torch.logical_or(cond1, cond2)
-        #cond3 = torch.logical_and(cond2, latent_code_lt_pos_mean)
-        #cond4 = torch.logical_and(cond2, latent_code_gt_pos_mean)
+    diff = pos_mean - neg_mean
+    for i in range(72):            
+        j = i // 4
+        m = i % 4
+        sfrom = m * 128
+        sto = sfrom + 128
+        diff[j, sfrom:sto] *= c_sliders[i].get()
+    diff *= mul_slider.get()
+    latent_code += diff
+    return latent_code, pos_mean, neg_mean
 
-        #latent_code = torch.where(cond1, pos_mean, latent_code)
-        #latent_code = torch.where(cond3, neg_min, latent_code)
-        #latent_code = torch.where(cond4, neg_max, latent_code)
-        #max_stddev = torch.maximum(pos_std, neg_std)
-        
-        diff = pos_mean - neg_mean
-        adiff = torch.abs(diff)
-        #std_devs = diff / max_stddev
-        #diff[0] *= 0
-        #diff[1] *= 0
-        #diff[2] *= 0
-        #diff[3] *= 0
-        #diff[4] *= 0
-        #diff[5] *= 0
-        #diff[6] *= 0
-        #diff[7] *= 0
-        #diff[8] *= 0
-        #diff[9] *= 0
-        #diff[10] *= 0
-        #diff[11] *= 0
-        #diff[12] *= 0
-        #diff[13] *= 0
-        #diff[14] *= 0
-        #diff[15] *= 0
-        #diff[16] *= 0
-        #diff[17] *= 0
-        latent_code = latent_code + (diff * std_slider.get())
+def reload_previews():
+    latent_code, pos_mean, neg_mean = get_latent()
+    set_image(latent_code, preview_label, size=1024)
+    set_image(pos_mean, preview_label2, size=1024)
+    set_image(neg_mean, preview_label3, size=1024)
 
-        #latent_code = torch.where(logical_or, latent_code,
-        #                          torch.minimum(torch.maximum(latent_code, pos_min), pos_max))
-    else:
-        latent_code = torch.minimum(torch.maximum(latent_code, pos_min), pos_max)
-    latent_code = ((latent_code - orig_latent) * mul_slider.get()) + orig_latent
+def save_preview_click(i):
+    npz_dir = npz_dir_entry.get()
+    latent_code, pos_mean, neg_mean = get_latent()
+    latents = [latent_code, pos_mean, neg_mean]
+    np.savez(npz_dir + '_.npz', w=latents[i].unsqueeze(0).cpu().detach().numpy())
 
-    set_image(latent_code, preview_label)
-    set_image(pos_mean, preview_label2)
-    set_image(neg_mean, preview_label3)
-
-
-def set_image(latent_code, label):
+def set_image(latent_code, label, size=256):
     latent_code = torch.unsqueeze(latent_code, 0)
     with torch.no_grad():
         img_orig2, _ = g_ema([latent_code], input_is_latent=True, randomize_noise=False)
     img_orig2 = torchvision.utils.make_grid(img_orig2, normalize=True, scale_each=True, range=(-1, 1))
     img_orig2 = torch.squeeze(img_orig2)
     image2 = transform(img_orig2)
-    image2 = image2.resize((256, 256), Image.ANTIALIAS)
+    image2 = image2.resize((size, size), Image.Resampling.LANCZOS)
     photo_image2 = ImageTk.PhotoImage(image2)
     label.configure(image=photo_image2)
     label.image = photo_image2
-
 
 window = Tk()
 toolbar = Frame(window)
@@ -182,6 +146,12 @@ text.pack(side="left", fill="both", expand=True)
 
 left_toolbar = Frame(toolbar)
 left_toolbar.pack(side=LEFT)
+left_toolbar2 = Frame(toolbar)
+left_toolbar2.pack(side=LEFT)
+left_toolbar3 = Frame(toolbar)
+left_toolbar3.pack(side=LEFT)
+left_toolbar4 = Frame(toolbar)
+left_toolbar4.pack(side=LEFT)
 npz_dir_entry = Entry(left_toolbar, width=50)
 npz_dir_entry.insert(END, './outdir')
 npz_dir_entry.pack(side=TOP)  # , fill=X, expand=1)
@@ -189,29 +159,101 @@ npz_dir_entry.pack(side=TOP)  # , fill=X, expand=1)
 load_npz_button = Button(left_toolbar, text="Load .npz", command=load_npz_func)
 load_npz_button.pack(side=TOP)
 
-get_positive_button = Button(left_toolbar, text="Preview", command=get_positive)
-get_positive_button.pack(side=TOP)
-
-pos_slider = Scale(left_toolbar, from_=0, to=5, resolution=0.01, orient=HORIZONTAL, length=300)
-pos_slider.bind('<B1-Motion>', slider_move)
-pos_slider.bind('<ButtonRelease-1>', slider_move)
-pos_slider.set(1)
-pos_slider.pack(side=TOP)
-neg_slider = Scale(left_toolbar, from_=0, to=5, resolution=0.01, orient=HORIZONTAL, length=300)
-neg_slider.bind('<B1-Motion>', slider_move)
-neg_slider.bind('<ButtonRelease-1>', slider_move)
-neg_slider.set(1)
-neg_slider.pack(side=TOP)
 mul_slider = Scale(left_toolbar, from_=-3, to=3, resolution=0.01, orient=HORIZONTAL, length=300)
 mul_slider.bind('<B1-Motion>', slider_move)
 mul_slider.bind('<ButtonRelease-1>', slider_move)
 mul_slider.set(1)
 mul_slider.pack(side=TOP)
-std_slider = Scale(left_toolbar, from_=-3, to=3, resolution=0.01, orient=HORIZONTAL, length=300)
-std_slider.bind('<B1-Motion>', slider_move)
-std_slider.bind('<ButtonRelease-1>', slider_move)
-std_slider.set(1)
-std_slider.pack(side=TOP)
+
+c_sliders = []
+for i in range(18):
+    c_slider = Scale(left_toolbar, from_=-1, to=3, resolution=0.01, orient=HORIZONTAL, length=300)
+    c_slider.bind('<B1-Motion>', slider_move)
+    c_slider.bind('<ButtonRelease-1>', slider_move)
+    c_slider.set(1)
+    c_slider.pack(side=TOP)
+    c_sliders.append(c_slider)
+for i in range(18):
+    c_slider = Scale(left_toolbar2, from_=-1, to=3, resolution=0.01, orient=HORIZONTAL, length=200)
+    c_slider.bind('<B1-Motion>', slider_move)
+    c_slider.bind('<ButtonRelease-1>', slider_move)
+    c_slider.set(1)
+    c_slider.pack(side=TOP)
+    c_sliders.append(c_slider)
+
+for i in range(18):
+    c_slider = Scale(left_toolbar3, from_=-1, to=3, resolution=0.01, orient=HORIZONTAL, length=200)
+    c_slider.bind('<B1-Motion>', slider_move)
+    c_slider.bind('<ButtonRelease-1>', slider_move)
+    c_slider.set(1)
+    c_slider.pack(side=TOP)
+    c_sliders.append(c_slider)
+
+for i in range(18):
+    c_slider = Scale(left_toolbar4, from_=-1, to=3, resolution=0.01, orient=HORIZONTAL, length=200)
+    c_slider.bind('<B1-Motion>', slider_move)
+    c_slider.bind('<ButtonRelease-1>', slider_move)
+    c_slider.set(1)
+    c_slider.pack(side=TOP)
+    c_sliders.append(c_slider)
+
+# for i in range(12):
+#     c_sliders[i].set(0)
+# #for i in range(12,16,1):
+#     #c_sliders[i].set(1)
+# for i in range(12,20,1):
+#     c_sliders[i].set(.25)
+# for i in range(20,44,1):
+#     c_sliders[i].set(1)
+# for i in range(44,52,1):
+#     c_sliders[i].set(1)
+# for i in range(52,56,1):
+#     c_sliders[i].set(1)
+# for i in range(56,72,1):
+#     c_sliders[i].set(0)
+
+# # just color sytle updates
+# for i in range(12,40,1):
+#     c_sliders[i].set(0)
+# for i in range(40,56,1):
+#     c_sliders[i].set(.5)
+# for i in range(56,72,1):
+#     c_sliders[i].set(1)
+
+# # medium sytle updates
+# for i in range(0,20,1):
+#     c_sliders[i].set(0)
+# for i in range(20,28,1):
+#     c_sliders[i].set(.25)
+# for i in range(28,52,1):
+#     c_sliders[i].set(.5)
+# for i in range(52,72,1):
+#     c_sliders[i].set(1)
+
+# # change color and focus
+# for i in range(0,24,1):
+#     c_sliders[i].set(0)
+# for i in range(24,44,1):
+#     c_sliders[i].set(.5)
+# for i in range(44,53,1):
+#     c_sliders[i].set(1)
+# c_sliders[53].set(.75)
+# c_sliders[54].set(.5)
+# c_sliders[55].set(.25)
+# for i in range(56,72,1):
+#     c_sliders[i].set(1)
+
+
+# full
+for i in range(0,72,1):
+    c_sliders[i].set(1)
+    
+# fix camera distortion
+#for i in range(12,14,1):
+#    c_sliders[i].set(1)
+#c_sliders[18].set(1)
+#c_sliders[20].set(.5)
+
 
 g_ema = Generator(1024, 512, 8)
 g_ema.load_state_dict(torch.load("./stylegan2-ffhq-config-f.pt")["g_ema"], strict=False)
@@ -226,16 +268,19 @@ orig_latent = torch.squeeze(orig_latent)
 img_orig = torchvision.utils.make_grid(img_orig, normalize=True, scale_each=True, range=(-1, 1))
 img_orig = torch.squeeze(img_orig)
 image = transform(img_orig)
-image = image.resize((256, 256), Image.ANTIALIAS)
+image = image.resize((1024, 1024), Image.Resampling.LANCZOS)
 photo_image = ImageTk.PhotoImage(image)
-preview_label = Label(toolbar, image=photo_image, width=256, height=256, background='black')
+preview_label = Label(toolbar, image=photo_image, width=1024, height=1024, background='black')
 preview_label.image = photo_image
+preview_label.bind('<Button-1>', lambda event: save_preview_click(0))
 preview_label.pack(side=LEFT)
-preview_label2 = Label(toolbar, image=photo_image, width=256, height=256, background='black')
+preview_label2 = Label(toolbar, image=photo_image, width=1024, height=1024, background='black')
 preview_label2.image = photo_image
+preview_label2.bind('<Button-1>', lambda event: save_preview_click(1))
 preview_label2.pack(side=LEFT)
-preview_label3 = Label(toolbar, image=photo_image, width=256, height=256, background='black')
+preview_label3 = Label(toolbar, image=photo_image, width=1024, height=1024, background='black')
 preview_label3.image = photo_image
+preview_label3.bind('<Button-1>', lambda event: save_preview_click(2))
 preview_label3.pack(side=LEFT)
 
 window.mainloop()

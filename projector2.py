@@ -52,6 +52,7 @@ def project2(
     target=torch.tensor(target_uint8.transpose([2, 0, 1]), device=device)
     target=torch.mul(target, torch_mask)
     assert target.shape == (G.img_channels, G.img_resolution, G.img_resolution)
+    G = copy.deepcopy(G).eval().requires_grad_(False).to(device) 
     noise_bufs = { name: buf for (name, buf) in G.synthesis.named_buffers() if 'noise_const' in name }
     
     minx = 0
@@ -71,6 +72,12 @@ def project2(
     optimizer = torch.optim.Adam([w_opt] + list(noise_bufs.values()), betas=(0.9, 0.999), lr=initial_learning_rate)
     w_out = torch.zeros([num_steps] + list(w_opt.shape[1:]), dtype=torch.float32, device=device)
 
+    for i in range(900):
+        w_noise = torch.randn_like(w_opt)
+        ws = ((w_opt + w_noise) * w_stds) + G.mapping.w_avg
+        np.savez(f'random/' + str(i) + '.npz', w=ws.unsqueeze(0).cpu().detach().numpy())
+    print('done')
+
     # Init noise.
     for buf in noise_bufs.values():
         buf[:] = torch.randn_like(buf)
@@ -87,7 +94,8 @@ def project2(
             param_group['lr'] = lr
         w_noise = torch.randn_like(w_opt) * w_noise_scale
         ws = ((w_opt + w_noise) * w_stds) + G.mapping.w_avg
-        
+        synth_images = G.synthesis(ws, noise_mode='const')
+
         #ws[0][6] = G.mapping.w_avg
         #ws[0][7] = G.mapping.w_avg
         #ws[0][8] = G.mapping.w_avg
@@ -230,6 +238,7 @@ def get_landmarks(filepath, predictor, detector, predictorRetinaFace):
 def project1(preview_label, image_container):
     device = torch.device('cuda')
     network_pkl = "./ffhq.pkl"
+    #network_pkl = "./stylegan3-t-ffhqu-1024x1024.pkl"
     with dnnlib.util.open_url(network_pkl) as fp:
         G = legacy.load_network_pkl(fp)['G_ema'].requires_grad_(False).to(device) # type: ignore
     with dnnlib.util.open_url('https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/metrics/vgg16.pt') as f:
