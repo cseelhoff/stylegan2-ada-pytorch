@@ -32,7 +32,7 @@ def calcTargets(coords, target_images, vgg16, size=224):
     return targets
 
 def project2(
-    target_pil, eyeleftp, eyerightp, mouthp, rotate_mask,
+    target_pil, eyeleftp, eyerightp, mouthp, rotate_mask, outdir,
     device: torch.device, G, vgg16, w_opt, w_stds, target_short_name: str, preview_label, image_container,
     num_steps                  = 1000,
     initial_learning_rate      = 0.1,
@@ -42,7 +42,6 @@ def project2(
     noise_ramp_length          = 0.75,
     regularize_noise_weight    = 1e5
 ):
-    outdir = "./outdir"
     #seed = 303
     #np.random.seed(seed)
     #torch.manual_seed(seed)
@@ -72,11 +71,11 @@ def project2(
     optimizer = torch.optim.Adam([w_opt] + list(noise_bufs.values()), betas=(0.9, 0.999), lr=initial_learning_rate)
     w_out = torch.zeros([num_steps] + list(w_opt.shape[1:]), dtype=torch.float32, device=device)
 
-    for i in range(900):
-        w_noise = torch.randn_like(w_opt)
-        ws = ((w_opt + w_noise) * w_stds) + G.mapping.w_avg
-        np.savez(f'random/' + str(i) + '.npz', w=ws.unsqueeze(0).cpu().detach().numpy())
-    print('done')
+    #for i in range(900):
+    #    w_noise = torch.randn_like(w_opt)
+    #    ws = ((w_opt + w_noise) * w_stds) + G.mapping.w_avg
+    #    np.savez(f'random/' + str(i) + '.npz', w=ws.unsqueeze(0).cpu().detach().numpy())
+    #print('done')
 
     # Init noise.
     for buf in noise_bufs.values():
@@ -112,11 +111,11 @@ def project2(
         synth_images = G.synthesis(ws, noise_mode='const')
         synth_images = (synth_images + 1) * (255/2)
 
-        synth_image2 = synth_images.clone().permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
-        image2 = PIL.Image.fromarray(synth_image2, 'RGB')
-        photo_image2 = PIL.ImageTk.PhotoImage(image2)
-        preview_label.itemconfig(image_container, image=photo_image2)
-        preview_label.update()
+        #synth_image2 = synth_images.clone().permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
+        #image2 = PIL.Image.fromarray(synth_image2, 'RGB')
+        #photo_image2 = PIL.ImageTk.PhotoImage(image2)
+        #preview_label.itemconfig(image_container, image=photo_image2)
+        #preview_label.update()
 
         dist = 0        
         for (c, target) in zip(coords, targets):
@@ -235,7 +234,7 @@ def get_landmarks(filepath, predictor, detector, predictorRetinaFace):
     landmarks = np.array(a)
     return landmarks
 
-def project1(preview_label, image_container):
+def project1(preview_label, image_container, raw_dir, outdir):
     device = torch.device('cuda')
     network_pkl = "./ffhq.pkl"
     #network_pkl = "./stylegan3-t-ffhqu-1024x1024.pkl"
@@ -255,17 +254,17 @@ def project1(preview_label, image_container):
     z_samples = torch.randn([w_avg_samples, G.mapping.z_dim], device=device)
     w_stds = G.mapping(z_samples, None).std(0)
     w_opt = (G.mapping(torch.randn([1,G.mapping.z_dim], device=device), None, truncation_psi=0.0001) - G.mapping.w_avg) / w_stds
-    target_short_names = os.listdir('./raw/')
+    target_short_names = os.listdir(raw_dir)
     #target_short_names = ['mean.png']
     #target_short_names = ['10003.jpg']
     target_short_names.sort()
 
     for target_short_name in target_short_names:
         print(target_short_name)
-        if os.path.isfile(os.path.join('./outdir/', (target_short_name + '.npz'))):
+        if os.path.isfile(os.path.join(outdir, (target_short_name + '.npz'))):
             print('Exists')
             continue
-        file_path = os.path.join('./raw/', target_short_name)
+        file_path = os.path.join(raw_dir, target_short_name)
         #try:
         landmarks = get_landmarks(file_path, predictor, detector, predictorRetinaFace)
         if landmarks is None:
@@ -276,7 +275,7 @@ def project1(preview_label, image_container):
         target_pil = target_pil.convert("RGB")
         w_opt2 = w_opt.clone().cuda()
         w_opt2.requires_grad = True
-        project2(target_pil, eyeleftp, eyerightp, mouthp, rotate_mask, device, G, vgg16, 
+        project2(target_pil, eyeleftp, eyerightp, mouthp, rotate_mask, outdir, device, G, vgg16, 
         w_opt2, w_stds, target_short_name, preview_label, image_container)
         #except Exception:
         #    print('Exception')
@@ -386,7 +385,12 @@ if __name__ == "__main__":
     #npz_dir_entry.pack(side=tkinter.TOP)  # , fill=X, expand=1)
     npz_dir_entry.grid()
 
-    load_npz_button = tkinter.Button(window, text="Contert to .npz", command=lambda:project1(preview_label, image_container))
+    raw_dir_entry = tkinter.Entry(window, width=50)
+    raw_dir_entry.insert(tkinter.END, './raw')
+    #npz_dir_entry.pack(side=tkinter.TOP)  # , fill=X, expand=1)
+    raw_dir_entry.grid()
+
+    load_npz_button = tkinter.Button(window, text="Contert to .npz", command=lambda:project1(preview_label, image_container, raw_dir_entry.get(), npz_dir_entry.get()))
     #load_npz_button.pack(side=tkinter.TOP)
     load_npz_button.grid()
 
